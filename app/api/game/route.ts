@@ -48,6 +48,8 @@ type State = {
   roundEndsAt?: number;
   message?: string;
   winnerIds?: string[];
+  roundWinnerId?: string;
+  roundEndReason?: "guess" | "letters" | "hangman";
 };
 type Row = {
   code: string;
@@ -58,7 +60,7 @@ type Row = {
 };
 const MAX_ROUNDS = 20,
   TURN_MS = 10_000,
-  ROUND_GAP = 5_000,
+  ROUND_GAP = 10_000,
   ONLINE_MS = 16_000,
   ROOM_TTL = 6 * 60 * 60 * 1000;
 const ABC = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -244,6 +246,8 @@ function publicState(s: State, version: number) {
     roundEndsAt: s.roundEndsAt,
     message: s.message,
     winnerIds: s.winnerIds,
+    roundWinnerId: s.roundWinnerId,
+    roundEndReason: s.roundEndReason,
     version,
   };
 }
@@ -277,15 +281,24 @@ function startRound(s: State) {
   s.wrongAttempts = [];
   s.errors = 0;
   s.message = undefined;
+  s.roundWinnerId = undefined;
+  s.roundEndReason = undefined;
   s.roundEndsAt = undefined;
   s.players.forEach((p) => (p.roundPoints = 0));
   s.turnIndex = (s.round - 1) % s.players.length;
   chooseWord(s);
   s.deadline = Date.now() + TURN_MS;
 }
-function finishRound(s: State, message: string) {
+function finishRound(
+  s: State,
+  message: string,
+  winnerId?: string,
+  reason: "guess" | "letters" | "hangman" = "hangman",
+) {
   s.status = "round_end";
   s.message = message;
+  s.roundWinnerId = winnerId;
+  s.roundEndReason = reason;
   s.deadline = undefined;
   s.roundEndsAt = Date.now() + ROUND_GAP;
 }
@@ -395,6 +408,7 @@ export async function POST(req: NextRequest) {
     if (!clientId) return fail("Identificador do dispositivo ausente");
     if (type === "create") {
       const nickname = validNickname(b.nickname);
+      const chosenAvatar = Math.max(0, Math.min(3, Number(b.avatar) || 0));
       for (let i = 0; i < 8; i++) {
         const roomCode = code(),
           pid = id(),
@@ -405,7 +419,7 @@ export async function POST(req: NextRequest) {
           token: ptoken,
           clientId,
           nickname,
-          avatar: 0,
+          avatar: chosenAvatar,
           score: 0,
           roundPoints: 0,
           ready: true,
@@ -452,6 +466,7 @@ export async function POST(req: NextRequest) {
     if (!/^[A-Z0-9]{6}$/.test(roomCode)) return fail("Código de sala inválido");
     if (type === "join") {
       const nickname = validNickname(b.nickname);
+      const chosenAvatar = Math.max(0, Math.min(3, Number(b.avatar) || 0));
       let newPlayer: Player | undefined;
       const out = await mutate(roomCode, (s) => {
         if (s.status !== "lobby") throw new Error("A partida já começou");
@@ -463,7 +478,7 @@ export async function POST(req: NextRequest) {
           token: token(),
           clientId,
           nickname,
-          avatar: s.players.length,
+          avatar: chosenAvatar,
           score: 0,
           roundPoints: 0,
           ready: false,
@@ -521,6 +536,8 @@ export async function POST(req: NextRequest) {
             finishRound(
               s,
               `${p.nickname} completou a palavra: ${(s.word || "").toUpperCase()}`,
+              p.id,
+              "letters",
             );
         } else {
           s.wrongLetters.push(letter);
@@ -533,7 +550,12 @@ export async function POST(req: NextRequest) {
           p.stats.errors++;
           s.message = `${p.nickname} errou a letra ${letter}`;
           if (s.errors >= 6)
-            finishRound(s, `A palavra era ${(s.word || "").toUpperCase()}`);
+            finishRound(
+              s,
+              `A palavra era ${(s.word || "").toUpperCase()}`,
+              undefined,
+              "hangman",
+            );
           else {
             nextConnected(s);
             s.deadline = Date.now() + TURN_MS;
@@ -552,6 +574,8 @@ export async function POST(req: NextRequest) {
           finishRound(
             s,
             `${p.nickname} descobriu: ${(s.word || "").toUpperCase()}`,
+            p.id,
+            "guess",
           );
         } else {
           s.wrongAttempts.push({ guess, playerId: p.id, nickname: p.nickname });
@@ -559,7 +583,12 @@ export async function POST(req: NextRequest) {
           p.stats.errors++;
           s.message = `Palpite incorreto de ${p.nickname}`;
           if (s.errors >= 6)
-            finishRound(s, `A palavra era ${(s.word || "").toUpperCase()}`);
+            finishRound(
+              s,
+              `A palavra era ${(s.word || "").toUpperCase()}`,
+              undefined,
+              "hangman",
+            );
           else {
             nextConnected(s);
             s.deadline = Date.now() + TURN_MS;

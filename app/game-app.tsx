@@ -61,6 +61,8 @@ type GameState = {
   roundEndsAt?: number;
   message?: string;
   winnerIds?: string[];
+  roundWinnerId?: string;
+  roundEndReason?: "guess" | "letters" | "hangman";
   version: number;
 };
 type Session = {
@@ -94,6 +96,7 @@ export default function GameApp() {
   const [mode, setMode] = useState<"create" | "join">("create");
   const [nickname, setNickname] = useState("");
   const [code, setCode] = useState("");
+  const [avatar, setAvatar] = useState(0);
   const [session, setSession] = useState<Session | null>(null);
   const [game, setGame] = useState<GameState | null>(null);
   const [loading, setLoading] = useState(false);
@@ -252,6 +255,7 @@ export default function GameApp() {
           nickname: nickname.trim(),
           code: code.trim().toUpperCase(),
           clientId,
+          avatar: String(avatar),
         }),
       });
       const d = (await r.json()) as {
@@ -332,6 +336,8 @@ export default function GameApp() {
         mode={mode}
         nickname={nickname}
         setNickname={setNickname}
+        avatar={avatar}
+        setAvatar={setAvatar}
         code={code}
         setCode={setCode}
         error={error}
@@ -354,6 +360,8 @@ export default function GameApp() {
     );
   if (game.status === "finished")
     return <Results game={game} me={me} onAction={action} onLeave={leave} />;
+  if (game.status === "round_end")
+    return <RoundBreak game={game} me={me} now={now} />;
   return (
     <Arena
       game={game}
@@ -370,6 +378,101 @@ export default function GameApp() {
       setGuess={setGuess}
       action={action}
     />
+  );
+}
+
+function RoundBreak({
+  game,
+  me,
+  now,
+}: {
+  game: GameState;
+  me?: Player;
+  now: number;
+}) {
+  const ranking = [...game.players].sort(
+    (a, b) =>
+      b.score - a.score ||
+      b.stats.words - a.stats.words ||
+      b.stats.letters - a.stats.letters ||
+      a.stats.errors - b.stats.errors,
+  );
+  const winner = game.players.find((p) => p.id === game.roundWinnerId);
+  const seconds = Math.max(
+    0,
+    Math.ceil(((game.roundEndsAt || 0) - now) / 1000),
+  );
+  return (
+    <main className="break-shell">
+      {!!winner && (
+        <div className="confetti">
+          {Array.from({ length: 24 }, (_, i) => (
+            <i
+              key={i}
+              style={{
+                left: `${(i * 37) % 100}%`,
+                animationDelay: `${(i % 7) * 0.18}s`,
+              }}
+            />
+          ))}
+        </div>
+      )}
+      <header className="game-header">
+        <Brand />
+        <div className="round">
+          <small>RODADA CONCLUÍDA</small>
+          <b>
+            {String(game.round).padStart(2, "0")}{" "}
+            <span>/ {game.maxRounds}</span>
+          </b>
+        </div>
+        <div className="next-round">
+          <small>PRÓXIMA RODADA</small>
+          <strong>{seconds}</strong>
+        </div>
+      </header>
+      <section className="championship-card">
+        <span className="kicker">PLACAR DO CAMPEONATO</span>
+        <div className={`round-emblem ${winner ? "won" : ""}`}>
+          {winner ? <Trophy /> : <Zap />}
+        </div>
+        <h1>
+          {winner
+            ? `${winner.nickname} VENCEU A RODADA!`
+            : "A FORCA VENCEU A RODADA"}
+        </h1>
+        <p>{game.message}</p>
+        <div className="championship-ranking">
+          {ranking.map((p, index) => (
+            <article className={index === 0 ? "leader" : ""} key={p.id}>
+              <span className="champ-pos">{index + 1}</span>
+              <div className={`avatar av${p.avatar}`}>{AVATARS[p.avatar]}</div>
+              <div>
+                <b>
+                  {p.nickname}
+                  {p.id === me?.id ? " (você)" : ""}
+                </b>
+                <small>+{p.roundPoints} nesta rodada</small>
+              </div>
+              <strong>
+                {p.score}
+                <small> PTS</small>
+              </strong>
+            </article>
+          ))}
+        </div>
+        <div className="loading-round">
+          <span
+            style={{
+              width: `${Math.max(0, Math.min(100, 100 - seconds * 10))}%`,
+            }}
+          />
+        </div>
+        <small className="auto-next">
+          A próxima disputa começa automaticamente
+        </small>
+      </section>
+    </main>
   );
 }
 
@@ -482,6 +585,8 @@ function Entry({
   mode,
   nickname,
   setNickname,
+  avatar,
+  setAvatar,
   code,
   setCode,
   error,
@@ -492,6 +597,8 @@ function Entry({
   mode: "create" | "join";
   nickname: string;
   setNickname: (v: string) => void;
+  avatar: number;
+  setAvatar: (v: number) => void;
   code: string;
   setCode: (v: string) => void;
   error: string;
@@ -516,6 +623,22 @@ function Entry({
             : "Use o código enviado pelo anfitrião."}
         </p>
         <form onSubmit={onSubmit}>
+          <fieldset className="avatar-picker">
+            <legend>ESCOLHA SEU AVATAR</legend>
+            <div>
+              {AVATARS.map((item, index) => (
+                <button
+                  type="button"
+                  key={item}
+                  className={avatar === index ? "selected" : ""}
+                  onClick={() => setAvatar(index)}
+                  aria-label={`Avatar ${index + 1}`}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          </fieldset>
           <label>
             SEU APELIDO
             <input
@@ -736,10 +859,10 @@ function Arena({
                   {ended
                     ? `+${p.roundPoints} NESTA RODADA`
                     : p.id === game.activePlayerId
-                    ? "JOGANDO AGORA"
-                    : p.connected
-                      ? "ONLINE"
-                      : "RECONECTANDO"}
+                      ? "JOGANDO AGORA"
+                      : p.connected
+                        ? "ONLINE"
+                        : "RECONECTANDO"}
                 </small>
               </div>
               <strong>
@@ -819,23 +942,25 @@ function Arena({
             </div>
           ) : (
             <>
-            <div className="used">
-              LETRAS DESCOBERTAS{" "}
+              <div className="used">
+                LETRAS DESCOBERTAS{" "}
                 <span>{game.usedLetters?.join(" · ") || "NENHUMA AINDA"}</span>
               </div>
-            {!!game.wrongAttempts?.length && (
-              <div className="error-history">
-                <b>HISTÓRICO DE ERROS</b>
-                <div>
-                  {game.wrongAttempts.map((attempt, index) => (
-                    <span key={index}>
-                      <strong>{attempt.letter || `“${attempt.guess}”`}</strong>{" "}
-                      {attempt.nickname}
-                    </span>
-                  ))}
+              {!!game.wrongAttempts?.length && (
+                <div className="error-history">
+                  <b>HISTÓRICO DE ERROS</b>
+                  <div>
+                    {game.wrongAttempts.map((attempt, index) => (
+                      <span key={index}>
+                        <strong>
+                          {attempt.letter || `“${attempt.guess}”`}
+                        </strong>{" "}
+                        {attempt.nickname}
+                      </span>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
               <div className="keyboard">
                 {LETTERS.map((l) => (
                   <button
