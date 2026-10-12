@@ -326,11 +326,24 @@ async function testRoundLifecycle() {
 async function testThreePlayers() {
   const host = await create(`M${runId}`, 0);
   const p2 = await join(host, `N${runId}`, 1);
-  await join(host, `P${runId}`, 2);
+  const p3 = await join(host, `P${runId}`, 2);
   const started = await action(host, "start");
   check(started.ok && started.body.players.length === 3, "iniciar e sincronizar partida com três jogadores");
   const wrongClient = await action({ ...p2, clientId: `clone-${p2.clientId}` }, "letter", { letter: "A" });
   check(wrongClient.status === 400, "bloquear ação com sessão clonada");
+  const guestLeft = await action(p2, "leave");
+  check(guestLeft.ok && guestLeft.body.players.length === 2, "remover participante que abandona a partida");
+  const removedSession = await get(p2);
+  check(removedSession.status === 401, "invalidar sessão de quem abandonou");
+  const hostLeft = await action(host, "leave");
+  check(
+    hostLeft.ok &&
+      hostLeft.body.players.length === 1 &&
+      hostLeft.body.players[0].id === p3.playerId &&
+      hostLeft.body.players[0].isHost &&
+      hostLeft.body.status === "finished",
+    "transferir host e encerrar quando resta um jogador",
+  );
 }
 
 try {

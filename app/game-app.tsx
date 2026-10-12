@@ -337,6 +337,10 @@ export default function GameApp() {
     setScreen("home");
     history.replaceState({}, "", location.pathname);
   };
+  const abandon = async () => {
+    await action("leave");
+    leave();
+  };
   const me = game?.players.find((p) => p.id === session?.playerId);
   const active = game?.players.find((p) => p.id === game.activePlayerId);
   const isMyTurn =
@@ -403,14 +407,14 @@ export default function GameApp() {
         game={game}
         me={me}
         onAction={action}
-        onLeave={leave}
+        onLeave={abandon}
         error={error}
       />
     );
   if (game.status === "finished")
-    return <Results game={game} me={me} onAction={action} onLeave={leave} />;
+    return <Results game={game} me={me} onAction={action} onLeave={abandon} />;
   if (game.status === "round_end")
-    return <RoundBreak game={game} me={me} now={now} />;
+    return <RoundBreak game={game} me={me} now={now} onLeave={abandon} />;
   return (
     <Arena
       game={game}
@@ -428,6 +432,7 @@ export default function GameApp() {
       action={action}
       now={now}
       pendingAction={pendingAction}
+      onLeave={abandon}
     />
   );
 }
@@ -436,10 +441,12 @@ function RoundBreak({
   game,
   me,
   now,
+  onLeave,
 }: {
   game: GameState;
   me?: Player;
   now: number;
+  onLeave: () => void;
 }) {
   const ranking = [...game.players].sort(
     (a, b) =>
@@ -477,9 +484,14 @@ function RoundBreak({
             <span>/ {game.maxRounds}</span>
           </b>
         </div>
-        <div className="next-round">
-          <small>PRÓXIMA RODADA</small>
-          <strong>{seconds}</strong>
+        <div className="header-right">
+          <div className="next-round">
+            <small>PRÓXIMA RODADA</small>
+            <strong>{seconds}</strong>
+          </div>
+          <button className="ghost abandon" onClick={onLeave}>
+            <LogOut /> <span>ABANDONAR</span>
+          </button>
         </div>
       </header>
       <section className="championship-card">
@@ -490,7 +502,7 @@ function RoundBreak({
         <h1>
           {winner
             ? `${winner.nickname} VENCEU A RODADA!`
-            : "A FORCA VENCEU A RODADA"}
+            : "RODADA CONCLUÍDA"}
         </h1>
         <p>{game.message}</p>
         <div className="championship-ranking">
@@ -852,6 +864,7 @@ function Arena({
   action,
   now,
   pendingAction,
+  onLeave,
 }: {
   game: GameState;
   me?: Player;
@@ -868,6 +881,7 @@ function Arena({
   action: (t: string, p?: Record<string, unknown>) => Promise<unknown>;
   now: number;
   pendingAction: string | null;
+  onLeave: () => void;
 }) {
   const ranking = [...game.players].sort((a, b) => b.score - a.score);
   const ended = game.status === "round_end";
@@ -894,6 +908,9 @@ function Arena({
           </div>
           <button className="icon-btn" onClick={toggleSound}>
             {sound ? <Volume2 /> : <VolumeX />}
+          </button>
+          <button className="ghost abandon" onClick={onLeave}>
+            <LogOut /> <span>ABANDONAR</span>
           </button>
         </div>
       </header>

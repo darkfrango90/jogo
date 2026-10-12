@@ -537,7 +537,39 @@ export async function POST(req: NextRequest) {
     const out = await mutate(roomCode, (s) => {
       const p = findPlayer(s, t, clientId);
       p.lastSeen = Date.now();
-      if (type === "ready") {
+      if (type === "leave") {
+        const leavingIndex = s.players.findIndex((item) => item.id === p.id);
+        const activeId = s.players[s.turnIndex]?.id;
+        const wasActive = activeId === p.id;
+        s.players.splice(leavingIndex, 1);
+        if (!s.players.length) {
+          s.status = "lobby";
+          s.hostPlayerId = "";
+          s.turnIndex = 0;
+          s.deadline = undefined;
+          s.guessingPlayerId = undefined;
+          s.guessDeadline = undefined;
+          s.message = "Sala vazia";
+        } else {
+          if (s.hostPlayerId === p.id) s.hostPlayerId = s.players[0].id;
+          const activeIndex = s.players.findIndex((item) => item.id === activeId);
+          s.turnIndex = activeIndex >= 0 ? activeIndex : leavingIndex % s.players.length;
+          if (s.guessingPlayerId === p.id) {
+            s.guessingPlayerId = undefined;
+            s.guessDeadline = undefined;
+          }
+          if (s.status === "playing" && s.players.length === 1) {
+            finishGame(s);
+          } else if (s.status === "playing" && wasActive) {
+            s.deadline = Date.now() + TURN_MS;
+            s.message = `${p.nickname} abandonou a partida`;
+          } else if (s.status === "finished") {
+            finishGame(s);
+          } else if (s.status === "playing" || s.status === "lobby") {
+            s.message = `${p.nickname} saiu da sala`;
+          }
+        }
+      } else if (type === "ready") {
         if (s.status !== "lobby") throw new Error("A partida já começou");
         p.ready = !p.ready;
       } else if (type === "start") {

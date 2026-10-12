@@ -701,6 +701,15 @@ nav,
   gap: 12px;
   align-items: center;
 }
+.abandon {
+  padding: 9px 12px;
+  font-size: 10px;
+  color: #ff8aa2;
+  border-color: #5b2938;
+}
+.abandon svg {
+  width: 15px;
+}
 .mini-code {
   padding-right: 10px;
   text-align: right;
@@ -1424,6 +1433,12 @@ nav,
   }
   .game-header .round {
     display: none;
+  }
+  .game-header .abandon span {
+    display: none;
+  }
+  .game-header .abandon {
+    padding: 9px;
   }
   .game-layout {
     grid-template-columns: 1fr;
