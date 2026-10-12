@@ -607,6 +607,8 @@ export async function POST(req: NextRequest) {
         s.winnerIds = undefined;
         startRound(s);
       } else if (type === "lobby") {
+        if (s.status !== "finished" || p.id !== s.hostPlayerId)
+          throw new Error("Somente o host pode voltar para a sala");
         s.status = "lobby";
         s.round = 0;
         s.usedWords = [];

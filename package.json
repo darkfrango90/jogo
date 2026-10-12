@@ -11,6 +11,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "test:e2e": "node scripts/e2e-production.mjs",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {

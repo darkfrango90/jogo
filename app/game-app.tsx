@@ -101,7 +101,7 @@ export default function GameApp() {
   const [game, setGame] = useState<GameState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
   const [guessing, setGuessing] = useState(false);
   const [guess, setGuess] = useState("");
   const [sound, setSound] = useState(true);
@@ -144,18 +144,25 @@ export default function GameApp() {
 
   useEffect(() => {
     const invite = new URLSearchParams(location.search).get("sala");
-    if (invite) {
-      setCode(invite.toUpperCase());
-      setMode("join");
-      setScreen("form");
-    }
     const raw = localStorage.getItem("hangman-session");
-    if (raw)
+    let saved: Session | null = null;
+    if (raw) {
       try {
-        const s = JSON.parse(raw);
-        setSession(s);
-        setScreen("room");
+        saved = JSON.parse(raw) as Session;
       } catch {}
+    }
+    const initialize = setTimeout(() => {
+      if (invite) {
+        setCode(invite.toUpperCase());
+        setMode("join");
+        setScreen("form");
+      }
+      if (saved) {
+        setSession(saved);
+        setScreen("room");
+      }
+    }, 0);
+    return () => clearTimeout(initialize);
   }, []);
   useEffect(() => {
     if ("serviceWorker" in navigator)
@@ -190,9 +197,12 @@ export default function GameApp() {
   }, []);
   useEffect(() => {
     if (!session) return;
-    fetchState(session, false);
+    const initial = setTimeout(() => fetchState(session, false), 0);
     const poll = setInterval(() => fetchState(session), 700);
-    return () => clearInterval(poll);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(poll);
+    };
   }, [session, fetchState]);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 100);
@@ -377,6 +387,7 @@ export default function GameApp() {
       guess={guess}
       setGuess={setGuess}
       action={action}
+      now={now}
     />
   );
 }
@@ -799,6 +810,7 @@ function Arena({
   guess,
   setGuess,
   action,
+  now,
 }: {
   game: GameState;
   me?: Player;
@@ -813,6 +825,7 @@ function Arena({
   guess: string;
   setGuess: (v: string) => void;
   action: (t: string, p?: Record<string, unknown>) => Promise<unknown>;
+  now: number;
 }) {
   const ranking = [...game.players].sort((a, b) => b.score - a.score);
   const ended = game.status === "round_end";
@@ -934,7 +947,7 @@ function Arena({
                   Próxima rodada em{" "}
                   {Math.max(
                     0,
-                    Math.ceil(((game.roundEndsAt || 0) - Date.now()) / 1000),
+                    Math.ceil(((game.roundEndsAt || 0) - now) / 1000),
                   )}
                   s
                 </span>
@@ -1143,9 +1156,11 @@ function Results({
               <RotateCcw /> JOGAR NOVAMENTE
             </button>
           )}
-          <button className="secondary" onClick={() => onAction("lobby")}>
-            <Users /> VOLTAR À SALA
-          </button>
+          {me?.isHost && (
+            <button className="secondary" onClick={() => onAction("lobby")}>
+              <Users /> VOLTAR À SALA
+            </button>
+          )}
           <button className="ghost" onClick={onLeave}>
             <LogOut /> SAIR
           </button>
