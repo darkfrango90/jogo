@@ -1,0 +1,15 @@
+{
+  "name": "Hangman Arena",
+  "short_name": "Hangman",
+  "description": "Jogo da forca multiplayer online em tempo real.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#080912",
+  "theme_color": "#080912",
+  "orientation": "portrait-primary",
+  "lang": "pt-BR",
+  "categories": ["games", "entertainment"],
+  "icons": [
+    {"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+  ]
+}
