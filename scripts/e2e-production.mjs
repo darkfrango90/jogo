@@ -1,3 +1,5 @@
+import { WORDS, validateDictionary } from "../lib/words.ts";
+
 const BASE = (process.env.BASE_URL || "https://hangman-arena.vercel.app").replace(/\/$/, "");
 const runId = Date.now().toString(36).slice(-6);
 const checks = [];
@@ -101,6 +103,71 @@ async function testStaticFiles() {
   check(icon192.ok && icon192.headers.get("content-type")?.includes("image/png"), "ícone PWA 192x192");
   check(icon512.ok && icon512.headers.get("content-type")?.includes("image/png"), "ícone PWA 512x512");
   check(maskable.ok && manifest.icons.some((icon) => icon.purpose === "maskable"), "ícone PWA maskable");
+  check(validateDictionary() && WORDS.length === 500, "dicionário com exatamente 500 palavras válidas");
+}
+
+function normalize(value) {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+}
+
+function matchesVisibleWord(entry, state) {
+  const used = new Set(state.usedLetters);
+  const expected = [...entry.word]
+    .map((character) => {
+      const normalized = normalize(character);
+      if (!/[A-Z]/.test(normalized)) return character;
+      return used.has(normalized) ? character.toUpperCase() : "_";
+    })
+    .join("");
+  const wrong = new Set(state.wrongLetters);
+  return expected === state.masked && ![...entry.word].some((character) => wrong.has(normalize(character)));
+}
+
+async function testCorrectGuessVictory() {
+  const host = await create(`V${runId}`, 2);
+  const guest = await join(host, `W${runId}`, 3);
+  const sessions = [host, guest];
+  let result = await action(host, "start");
+  check(result.ok, "iniciar rodada para testar vitória por palpite");
+  let state = result.body;
+  let candidates = WORDS.filter(
+    (entry) =>
+      entry.category === state.category &&
+      entry.difficulty === state.difficulty &&
+      entry.hint === state.hint,
+  );
+
+  while (candidates.length > 1 && state.status === "playing" && state.errors < 5) {
+    candidates = candidates.filter((entry) => matchesVisibleWord(entry, state));
+    if (candidates.length <= 1) break;
+    const attempted = new Set([...state.usedLetters, ...state.wrongLetters]);
+    const options = "AEIOURSTNMLCDPBGFVHJQXZWKY"
+      .split("")
+      .filter((letter) => !attempted.has(letter))
+      .map((letter) => ({
+        letter,
+        count: candidates.filter((entry) => normalize(entry.word).includes(letter)).length,
+      }))
+      .sort((a, b) => b.count - a.count);
+    const turn = sessionFor(sessions, state.activePlayerId);
+    result = await action(turn, "letter", { letter: options[0].letter });
+    check(result.ok, `refinar palavra secreta com a letra ${options[0].letter}`);
+    state = result.body;
+  }
+  candidates = candidates.filter((entry) => matchesVisibleWord(entry, state));
+  check(candidates.length === 1 && state.status === "playing", "deduzir palavra sem acessar segredo do servidor");
+  const winner = sessionFor(sessions, state.activePlayerId);
+  const scoreBefore = state.players.find((player) => player.id === winner.playerId).score;
+  result = await action(winner, "guess", { guess: candidates[0].word });
+  check(
+    result.ok &&
+      result.body.status === "round_end" &&
+      result.body.roundEndReason === "guess" &&
+      result.body.roundWinnerId === winner.playerId,
+    "encerrar rodada com vencedor após palpite correto",
+  );
+  const scoreAfter = result.body.players.find((player) => player.id === winner.playerId).score;
+  check(scoreAfter === scoreBefore + 20, "somar vinte pontos pelo acerto da palavra");
 }
 
 async function testFourPlayers() {
@@ -142,6 +209,7 @@ async function testFourPlayers() {
   check(refused.status === 400, "recusar jogada fora do turno");
 
   const active = sessionFor(sessions, state.activePlayerId);
+  const scoreBeforeConcurrent = state.players.find((player) => player.id === active.playerId).score;
   const simultaneous = await Promise.all([
     action(active, "letter", { letter: "A" }),
     action(active, "letter", { letter: "A" }),
@@ -149,7 +217,10 @@ async function testFourPlayers() {
   check(simultaneous.filter((result) => result.ok).length === 1, "serializar ações simultâneas duplicadas");
   state = simultaneous.find((result) => result.ok).body;
 
-  let retained = false;
+  let retained =
+    state.players.find((player) => player.id === active.playerId).score > scoreBeforeConcurrent;
+  if (retained)
+    check(state.activePlayerId === active.playerId, "manter turno e reiniciar cronômetro após acerto");
   for (const letter of ["E", "I", "O", "U", "A"]) {
     if (state.usedLetters.includes(letter) || state.status !== "playing") continue;
     const turn = sessionFor(sessions, state.activePlayerId);
@@ -227,12 +298,13 @@ async function testRoundLifecycle() {
   }
   check(state.status === "round_end" && state.errors === 6, "encerrar rodada ao completar seis erros");
   check(state.roundEndReason === "hangman" && !state.masked.includes("_"), "revelar palavra somente no fim da rodada");
-  const gap = state.roundEndsAt - Date.now();
-  check(gap > 8_000 && gap <= 10_500, "exibir ranking por dez segundos entre rodadas");
-
-  await new Promise((resolve) => setTimeout(resolve, Math.max(0, gap + 500)));
+  check(Number.isFinite(state.roundEndsAt), "informar prazo da tela de ranking");
+  await new Promise((resolve) => setTimeout(resolve, 6_000));
   result = await get(host);
-  check(result.ok && result.body.round === 2 && result.body.status === "playing", "iniciar segunda rodada automaticamente");
+  check(result.ok && result.body.status === "round_end", "manter ranking visível durante o intervalo");
+  await new Promise((resolve) => setTimeout(resolve, 5_000));
+  result = await get(host);
+  check(result.ok && result.body.round === 2 && result.body.status === "playing", "iniciar segunda rodada após cerca de dez segundos");
   check(result.body.difficulty === "difícil", "alternar para dificuldade difícil na segunda rodada");
   check(!Object.hasOwn(result.body, "word"), "manter palavra da segunda rodada protegida");
 }
@@ -251,6 +323,7 @@ try {
   console.log(`Testando ${BASE}`);
   await testStaticFiles();
   await testFourPlayers();
+  await testCorrectGuessVictory();
   await testRoundLifecycle();
   await testThreePlayers();
   console.log(`\n${checks.length} verificações concluídas com sucesso.`);
