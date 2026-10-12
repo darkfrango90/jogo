@@ -860,12 +860,27 @@ nav,
 .timer.danger .progress {
   stroke: #ff587a;
 }
+.timer.checking .progress {
+  stroke: #35d6ff;
+  animation: checking-ring 0.8s ease-in-out infinite alternate;
+}
+.timer.checking strong {
+  color: #35d6ff;
+}
+@keyframes checking-ring {
+  to {
+    opacity: 0.35;
+  }
+}
 .gallows-wrap {
   display: grid;
   grid-template-columns: 250px 1fr;
   align-items: center;
   min-height: 230px;
   padding: 4px 20px;
+}
+.gallows-wrap.points-only {
+  grid-template-columns: 1fr;
 }
 .gallows {
   width: 220px;

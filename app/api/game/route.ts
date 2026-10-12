@@ -45,6 +45,8 @@ type State = {
   errors: number;
   turnIndex: number;
   deadline?: number;
+  guessingPlayerId?: string;
+  guessDeadline?: number;
   roundEndsAt?: number;
   message?: string;
   winnerIds?: string[];
@@ -59,9 +61,10 @@ type Row = {
   expires_at: number;
 };
 const MAX_ROUNDS = 20,
-  TURN_MS = 10_000,
+  TURN_MS = 15_000,
   ROUND_GAP = 10_000,
-  ONLINE_MS = 16_000,
+  ONLINE_MS = 25_000,
+  PRESENCE_WRITE_MS = 6_000,
   ROOM_TTL = 6 * 60 * 60 * 1000;
 const ABC = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const clean = (s: string) =>
@@ -166,27 +169,21 @@ async function removeObject(path: string) {
     body: JSON.stringify({ prefixes: [path] }),
   });
 }
+const roomQueues = new Map<string, Promise<void>>();
 async function withLock<T>(roomCode: string, fn: () => Promise<T>): Promise<T> {
-  const path = `locks/${roomCode}.json`;
-  for (let i = 0; i < 30; i++) {
-    const stamp = JSON.stringify({ at: Date.now(), nonce: id() });
-    const r = await writeObject(path, stamp, false);
-    if (r.ok) {
-      try {
-        return await fn();
-      } finally {
-        await removeObject(path);
-      }
-    }
-    const old = await readObject(path);
-    if (old) {
-      try {
-        if (Date.now() - JSON.parse(old).at > 5000) await removeObject(path);
-      } catch {}
-    }
-    await new Promise((res) => setTimeout(res, 50 + i * 10));
+  const previous = roomQueues.get(roomCode) || Promise.resolve();
+  let release = () => {};
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  roomQueues.set(roomCode, current);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (roomQueues.get(roomCode) === current) roomQueues.delete(roomCode);
   }
-  throw new Error("Sala ocupada por outra jogada. Tente novamente.");
 }
 
 function findPlayer(s: State, t: string, c: string) {
@@ -243,6 +240,7 @@ function publicState(s: State, version: number) {
     errors: s.errors,
     activePlayerId: s.players[s.turnIndex]?.id,
     deadline: s.deadline,
+    guessingPlayerId: s.guessingPlayerId,
     roundEndsAt: s.roundEndsAt,
     message: s.message,
     winnerIds: s.winnerIds,
@@ -288,6 +286,8 @@ function startRound(s: State) {
   s.turnIndex = (s.round - 1) % s.players.length;
   chooseWord(s);
   s.deadline = Date.now() + TURN_MS;
+  s.guessingPlayerId = undefined;
+  s.guessDeadline = undefined;
 }
 function finishRound(
   s: State,
@@ -300,6 +300,8 @@ function finishRound(
   s.roundWinnerId = winnerId;
   s.roundEndReason = reason;
   s.deadline = undefined;
+  s.guessingPlayerId = undefined;
+  s.guessDeadline = undefined;
   s.roundEndsAt = Date.now() + ROUND_GAP;
 }
 function finishGame(s: State) {
@@ -333,7 +335,19 @@ function advance(s: State) {
       s.players.find((p) => now - p.lastSeen < ONLINE_MS) || s.players[0];
     s.hostPlayerId = replacement.id;
   }
-  if (s.status === "playing" && s.deadline && now >= s.deadline) {
+  if (
+    s.status === "playing" &&
+    s.guessingPlayerId &&
+    s.guessDeadline &&
+    now >= s.guessDeadline
+  ) {
+    const p = s.players.find((item) => item.id === s.guessingPlayerId);
+    s.message = `Tempo de resposta esgotado para ${p?.nickname || "o jogador"}`;
+    s.guessingPlayerId = undefined;
+    s.guessDeadline = undefined;
+    nextConnected(s);
+    s.deadline = now + TURN_MS;
+  } else if (s.status === "playing" && s.deadline && now >= s.deadline) {
     const p = s.players[s.turnIndex];
     s.message = `Tempo esgotado para ${p.nickname}`;
     nextConnected(s);
@@ -386,6 +400,31 @@ export async function GET(req: NextRequest) {
       roomCode = (q.get("code") || "").toUpperCase(),
       t = q.get("token") || "",
       c = q.get("clientId") || "";
+    const row = await getRoom(roomCode);
+    if (!row) throw new Error("Sala não encontrada");
+    const snapshot = JSON.parse(row.state) as State;
+    snapshot.wrongAttempts ??= [];
+    const player = findPlayer(snapshot, t, c);
+    const now = Date.now();
+    const deadlineReached =
+      (snapshot.status === "playing" &&
+        ((!!snapshot.deadline && now >= snapshot.deadline) ||
+          (!!snapshot.guessDeadline && now >= snapshot.guessDeadline))) ||
+      (snapshot.status === "round_end" &&
+        !!snapshot.roundEndsAt &&
+        now >= snapshot.roundEndsAt);
+    const hostMissing =
+      !snapshot.players.some((item) => item.id === snapshot.hostPlayerId) ||
+      now -
+          (snapshot.players.find((item) => item.id === snapshot.hostPlayerId)
+            ?.lastSeen || 0) >
+        ONLINE_MS * 2;
+    if (
+      !deadlineReached &&
+      !hostMissing &&
+      now - player.lastSeen < PRESENCE_WRITE_MS
+    )
+      return reply(publicState(snapshot, row.version));
     const out = await mutate(roomCode, (s) => {
       const p = findPlayer(s, t, c);
       p.lastSeen = Date.now();
@@ -549,20 +588,33 @@ export async function POST(req: NextRequest) {
           s.errors++;
           p.stats.errors++;
           s.message = `${p.nickname} errou a letra ${letter}`;
-          if (s.errors >= 6)
-            finishRound(
-              s,
-              `A palavra era ${(s.word || "").toUpperCase()}`,
-              undefined,
-              "hangman",
-            );
-          else {
-            nextConnected(s);
-            s.deadline = Date.now() + TURN_MS;
-          }
+          nextConnected(s);
+          s.deadline = Date.now() + TURN_MS;
         }
-      } else if (type === "guess") {
+      } else if (type === "begin_guess") {
         ensureTurn(s, p);
+        s.guessingPlayerId = p.id;
+        s.guessDeadline = Date.now() + TURN_MS;
+        s.deadline = undefined;
+        s.message = `${p.nickname} está preparando um palpite`;
+      } else if (type === "cancel_guess") {
+        if (s.status !== "playing" || s.guessingPlayerId !== p.id)
+          throw new Error("Não há palpite aguardando resposta");
+        s.guessingPlayerId = undefined;
+        s.guessDeadline = undefined;
+        s.deadline = Date.now() + TURN_MS;
+        s.message = `${p.nickname} cancelou o palpite`;
+      } else if (type === "guess") {
+        if (s.guessingPlayerId) {
+          if (s.status !== "playing" || s.guessingPlayerId !== p.id)
+            throw new Error("Aguarde a sua vez");
+          if (!s.guessDeadline || Date.now() >= s.guessDeadline) {
+            advance(s);
+            throw new Error("Seu tempo de resposta terminou");
+          }
+          s.guessingPlayerId = undefined;
+          s.guessDeadline = undefined;
+        } else ensureTurn(s, p);
         const guess = (b.guess || "").trim();
         if (!guess) throw new Error("Digite uma palavra");
         p.stats.guesses++;
@@ -582,17 +634,8 @@ export async function POST(req: NextRequest) {
           s.errors++;
           p.stats.errors++;
           s.message = `Palpite incorreto de ${p.nickname}`;
-          if (s.errors >= 6)
-            finishRound(
-              s,
-              `A palavra era ${(s.word || "").toUpperCase()}`,
-              undefined,
-              "hangman",
-            );
-          else {
-            nextConnected(s);
-            s.deadline = Date.now() + TURN_MS;
-          }
+          nextConnected(s);
+          s.deadline = Date.now() + TURN_MS;
         }
       } else if (type === "rematch") {
         if (s.status !== "finished" || p.id !== s.hostPlayerId)
@@ -618,6 +661,8 @@ export async function POST(req: NextRequest) {
         s.difficulty = undefined;
         s.wrongAttempts = [];
         s.deadline = undefined;
+        s.guessingPlayerId = undefined;
+        s.guessDeadline = undefined;
         s.winnerIds = undefined;
         s.message = undefined;
         s.players.forEach((x) => {
@@ -645,6 +690,7 @@ function validNickname(raw?: string) {
 function ensureTurn(s: State, p: Player) {
   advance(s);
   if (s.status !== "playing") throw new Error("A rodada não está ativa");
+  if (s.guessingPlayerId) throw new Error("Um palpite está em andamento");
   if (s.players[s.turnIndex]?.id !== p.id) throw new Error("Aguarde a sua vez");
   if (!s.deadline || Date.now() >= s.deadline)
     throw new Error("Seu tempo terminou");

@@ -58,6 +58,7 @@ type GameState = {
   errors?: number;
   activePlayerId?: string;
   deadline?: number;
+  guessingPlayerId?: string;
   roundEndsAt?: number;
   message?: string;
   winnerIds?: string[];
@@ -104,11 +105,15 @@ export default function GameApp() {
   const [now, setNow] = useState(() => Date.now());
   const [guessing, setGuessing] = useState(false);
   const [guess, setGuess] = useState("");
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [frozenSeconds, setFrozenSeconds] = useState<number | null>(null);
   const [sound, setSound] = useState(true);
   const [installPrompt, setInstallPrompt] = useState<InstallPrompt | null>(
     null,
   );
   const lastStatus = useRef<string>("");
+  const actionPendingRef = useRef(false);
+  const audioRef = useRef<AudioContext | null>(null);
   const tone = useCallback(
     (kind: "ok" | "bad" | "tick" | "win") => {
       if (!sound) return;
@@ -117,7 +122,12 @@ export default function GameApp() {
           window.AudioContext ||
           (window as unknown as { webkitAudioContext: typeof AudioContext })
             .webkitAudioContext;
-        const ctx = new C();
+        const ctx =
+          audioRef.current && audioRef.current.state !== "closed"
+            ? audioRef.current
+            : new C();
+        audioRef.current = ctx;
+        if (ctx.state === "suspended") void ctx.resume();
         const o = ctx.createOscillator(),
           g = ctx.createGain();
         o.connect(g);
@@ -140,6 +150,12 @@ export default function GameApp() {
       } catch {}
     },
     [sound],
+  );
+  useEffect(
+    () => () => {
+      if (audioRef.current?.state !== "closed") void audioRef.current?.close();
+    },
+    [],
   );
 
   useEffect(() => {
@@ -197,15 +213,24 @@ export default function GameApp() {
   }, []);
   useEffect(() => {
     if (!session) return;
-    const initial = setTimeout(() => fetchState(session, false), 0);
-    const poll = setInterval(() => fetchState(session), 700);
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async (initial = false) => {
+      if (!actionPendingRef.current) await fetchState(session, !initial);
+      if (!stopped)
+        timer = setTimeout(
+          () => void poll(),
+          document.hidden ? 5_000 : 2_000,
+        );
+    };
+    timer = setTimeout(() => void poll(true), 0);
     return () => {
-      clearTimeout(initial);
-      clearInterval(poll);
+      stopped = true;
+      clearTimeout(timer);
     };
   }, [session, fetchState]);
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 100);
+    const t = setInterval(() => setNow(Date.now()), 250);
     return () => clearInterval(t);
   }, []);
   useEffect(() => {
@@ -222,7 +247,15 @@ export default function GameApp() {
   }, [game, tone]);
   const action = useCallback(
     async (type: string, payload: Record<string, unknown> = {}) => {
-      if (!session) return;
+      if (!session || actionPendingRef.current) return;
+      const freezesTimer =
+        type === "letter" || type === "guess" || type === "begin_guess";
+      actionPendingRef.current = true;
+      setPendingAction(type);
+      if (freezesTimer)
+        setFrozenSeconds(
+          Math.max(0, Math.ceil(((game?.deadline || 0) - Date.now()) / 1000)),
+        );
       setError("");
       try {
         const r = await fetch(API, {
@@ -243,9 +276,13 @@ export default function GameApp() {
       } catch (e) {
         setError(e instanceof Error ? e.message : "Erro de conexão");
         tone("bad");
+      } finally {
+        actionPendingRef.current = false;
+        setPendingAction(null);
+        setFrozenSeconds(null);
       }
     },
-    [session, tone],
+    [game?.deadline, session, tone],
   );
   const enter = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -304,17 +341,19 @@ export default function GameApp() {
   const active = game?.players.find((p) => p.id === game.activePlayerId);
   const isMyTurn =
     !!me && game?.status === "playing" && game.activePlayerId === me.id;
-  const seconds = Math.max(0, Math.ceil(((game?.deadline || 0) - now) / 1000));
+  const seconds =
+    frozenSeconds ??
+    Math.max(0, Math.ceil(((game?.deadline || 0) - now) / 1000));
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!isMyTurn || guessing || e.repeat) return;
+      if (!isMyTurn || guessing || pendingAction || e.repeat) return;
       const l = e.key.toUpperCase();
       if (LETTERS.includes(l) && !game?.usedLetters?.includes(l))
         action("letter", { letter: l });
     };
     addEventListener("keydown", onKey);
     return () => removeEventListener("keydown", onKey);
-  }, [isMyTurn, guessing, game?.usedLetters, action]);
+  }, [isMyTurn, guessing, pendingAction, game?.usedLetters, action]);
   useEffect(() => {
     if (seconds <= 3 && seconds > 0 && isMyTurn) tone("tick");
   }, [seconds, isMyTurn, tone]);
@@ -388,6 +427,7 @@ export default function GameApp() {
       setGuess={setGuess}
       action={action}
       now={now}
+      pendingAction={pendingAction}
     />
   );
 }
@@ -811,6 +851,7 @@ function Arena({
   setGuess,
   action,
   now,
+  pendingAction,
 }: {
   game: GameState;
   me?: Player;
@@ -826,9 +867,15 @@ function Arena({
   setGuess: (v: string) => void;
   action: (t: string, p?: Record<string, unknown>) => Promise<unknown>;
   now: number;
+  pendingAction: string | null;
 }) {
   const ranking = [...game.players].sort((a, b) => b.score - a.score);
   const ended = game.status === "round_end";
+  const verifying =
+    pendingAction === "letter" ||
+    pendingAction === "guess" ||
+    pendingAction === "begin_guess" ||
+    !!game.guessingPlayerId;
   return (
     <main className="game-shell">
       <header className="game-header">
@@ -894,7 +941,9 @@ function Arena({
               <small>{isMyTurn ? "É A SUA VEZ!" : "JOGANDO AGORA"}</small>
               <b>{active?.nickname || "Aguardando…"}</b>
             </div>
-            <div className={`timer ${seconds <= 3 ? "danger" : ""}`}>
+            <div
+              className={`timer ${seconds <= 3 && !verifying ? "danger" : ""} ${verifying ? "checking" : ""}`}
+            >
               <svg viewBox="0 0 44 44">
                 <circle cx="22" cy="22" r="19" />
                 <circle
@@ -903,15 +952,14 @@ function Arena({
                   cy="22"
                   r="19"
                   style={{
-                    strokeDashoffset: 119 - (119 * Math.min(seconds, 10)) / 10,
+                    strokeDashoffset: 119 - (119 * Math.min(seconds, 15)) / 15,
                   }}
                 />
               </svg>
-              <strong>{ended ? "·" : seconds}</strong>
+              <strong>{ended ? "·" : verifying ? "…" : seconds}</strong>
             </div>
           </div>
-          <div className="gallows-wrap">
-            <Gallows errors={game.errors || 0} />
+          <div className="gallows-wrap points-only">
             <div className="word-zone">
               <span className="category">
                 {game.category} • {game.difficulty?.toUpperCase()}
@@ -932,7 +980,9 @@ function Arena({
               <p>
                 {ended
                   ? game.message
-                  : isMyTurn
+                  : verifying
+                    ? "Verificando a jogada…"
+                    : isMyTurn
                     ? "Escolha uma letra ou arrisque a palavra"
                     : "Acompanhe a jogada do adversário"}
               </p>
@@ -978,7 +1028,11 @@ function Arena({
                 {LETTERS.map((l) => (
                   <button
                     key={l}
-                    disabled={!isMyTurn || game.usedLetters?.includes(l)}
+                    disabled={
+                      !isMyTurn ||
+                      verifying ||
+                      game.usedLetters?.includes(l)
+                    }
                     className={
                       game.wrongLetters?.includes(l)
                         ? "wrong"
@@ -994,8 +1048,12 @@ function Arena({
               </div>
               <button
                 className="know"
-                disabled={!isMyTurn}
-                onClick={() => setGuessing(true)}
+                disabled={!isMyTurn || verifying}
+                onClick={async () => {
+                  setGuessing(true);
+                  const started = await action("begin_guess");
+                  if (!started) setGuessing(false);
+                }}
               >
                 <Zap fill="currentColor" /> EU SEI A PALAVRA!{" "}
                 <span>+20 PTS</span>
@@ -1012,15 +1070,21 @@ function Arena({
             onSubmit={async (e) => {
               e.preventDefault();
               if (!guess.trim()) return;
-              await action("guess", { guess });
-              setGuess("");
-              setGuessing(false);
+              const answered = await action("guess", { guess });
+              if (answered) {
+                setGuess("");
+                setGuessing(false);
+              }
             }}
           >
             <button
               type="button"
               className="close"
-              onClick={() => setGuessing(false)}
+              disabled={!!pendingAction}
+              onClick={async () => {
+                const cancelled = await action("cancel_guess");
+                if (cancelled) setGuessing(false);
+              }}
             >
               ×
             </button>
@@ -1029,39 +1093,20 @@ function Arena({
             </div>
             <small>VALE +20 PONTOS</small>
             <h2>Qual é a palavra?</h2>
-            <p>O cronômetro continua correndo. Pense rápido!</p>
+            <p>O cronômetro está pausado enquanto você responde.</p>
             <input
               autoFocus
               value={guess}
               onChange={(e) => setGuess(e.target.value)}
               placeholder="Digite seu palpite"
             />
-            <button className="primary wide">CONFIRMAR RESPOSTA</button>
+            <button className="primary wide" disabled={!!pendingAction}>
+              {pendingAction === "guess" ? "VERIFICANDO…" : "CONFIRMAR RESPOSTA"}
+            </button>
           </form>
         </div>
       )}
     </main>
-  );
-}
-function Gallows({ errors }: { errors: number }) {
-  return (
-    <svg
-      className="gallows"
-      viewBox="0 0 240 250"
-      aria-label={`${errors} de 6 erros`}
-    >
-      <path
-        className="wood"
-        d="M26 228h150M60 228V25h112M61 55l31-30M171 25v32"
-      />
-      {errors > 0 && <circle className="bodypart" cx="171" cy="76" r="19" />}
-      {errors > 1 && <path className="bodypart" d="M171 95v62" />}
-      {errors > 2 && <path className="bodypart" d="M171 112l-30 28" />}
-      {errors > 3 && <path className="bodypart" d="M171 112l30 28" />}
-      {errors > 4 && <path className="bodypart" d="M171 157l-27 39" />}
-      {errors > 5 && <path className="bodypart" d="M171 157l27 39" />}
-      <circle className="base-glow" cx="60" cy="228" r="7" />
-    </svg>
   );
 }
 function Results({

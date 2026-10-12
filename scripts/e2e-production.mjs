@@ -158,6 +158,13 @@ async function testCorrectGuessVictory() {
   check(candidates.length === 1 && state.status === "playing", "deduzir palavra sem acessar segredo do servidor");
   const winner = sessionFor(sessions, state.activePlayerId);
   const scoreBefore = state.players.find((player) => player.id === winner.playerId).score;
+  result = await action(winner, "begin_guess");
+  check(
+    result.ok &&
+      result.body.guessingPlayerId === winner.playerId &&
+      !result.body.deadline,
+    "pausar cronômetro ao abrir o palpite",
+  );
   result = await action(winner, "guess", { guess: candidates[0].word });
   check(
     result.ok &&
@@ -276,11 +283,11 @@ async function testRoundLifecycle() {
 
   const activeBeforeTimeout = state.activePlayerId;
   const errorsBeforeTimeout = state.errors;
-  await new Promise((resolve) => setTimeout(resolve, 10_600));
+  await new Promise((resolve) => setTimeout(resolve, 15_600));
   result = await get(host);
   check(result.ok, "sincronizar depois do timeout");
   state = result.body;
-  check(state.activePlayerId !== activeBeforeTimeout, "passar o turno após dez segundos");
+  check(state.activePlayerId !== activeBeforeTimeout, "passar o turno após quinze segundos");
   check(state.errors === errorsBeforeTimeout, "não contar timeout como erro da forca");
 
   const invalidReconnect = await get(host, `wrong-${host.clientId}`);
@@ -289,15 +296,22 @@ async function testRoundLifecycle() {
   check(reconnect.ok && reconnect.body.code === host.code, "reconectar sessão válida");
   state = reconnect.body;
 
-  let guessIndex = 0;
-  while (state.status === "playing") {
+  for (let guessIndex = 0; guessIndex < 7; guessIndex++) {
     const turn = sessionFor(sessions, state.activePlayerId);
-    result = await action(turn, "guess", { guess: `PALPITEINVALIDO${guessIndex++}` });
-    check(result.ok, `processar palpite incorreto ${guessIndex}`);
+    result = await action(turn, "guess", { guess: `PALPITEINVALIDO${guessIndex}` });
+    check(result.ok, `processar palpite incorreto ${guessIndex + 1}`);
     state = result.body;
   }
-  check(state.status === "round_end" && state.errors === 6, "encerrar rodada ao completar seis erros");
-  check(state.roundEndReason === "hangman" && !state.masked.includes("_"), "revelar palavra somente no fim da rodada");
+  check(state.status === "playing" && state.errors > 6, "continuar rodada sem limite de erros");
+  for (const letter of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+    if (state.status !== "playing" || state.usedLetters.includes(letter)) continue;
+    const turn = sessionFor(sessions, state.activePlayerId);
+    result = await action(turn, "letter", { letter });
+    check(result.ok, `processar letra ${letter} sem limite de erros`);
+    state = result.body;
+  }
+  check(state.status === "round_end", "encerrar rodada somente após descobrir a palavra");
+  check(state.roundEndReason === "letters" && !state.masked.includes("_"), "revelar palavra no fim da rodada");
   check(Number.isFinite(state.roundEndsAt), "informar prazo da tela de ranking");
   await new Promise((resolve) => setTimeout(resolve, 6_000));
   result = await get(host);
